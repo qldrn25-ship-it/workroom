@@ -39,28 +39,63 @@ jobs:
           cd "$APP_DIR"
           npm install
 
-      - name: Build WORKROOM.app and DMG
+      - name: Build unpacked WORKROOM.app
         shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
           cd "$APP_DIR"
-          npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
+          npx electron-builder --mac dir --${{ matrix.arch }} --publish never
 
-      - name: Verify WORKROOM identity
+      - name: Ad-hoc sign WORKROOM.app
         shell: bash
         run: |
           APP="$(find "$APP_DIR/dist" -type d -name 'WORKROOM.app' -print -quit)"
           test -n "$APP"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist"
-          test -x "$APP/Contents/MacOS/WORKROOM"
+          echo "APP=$APP" >> "$GITHUB_ENV"
 
-      - name: Upload macOS build
+          # Sign nested native code first, then the complete bundle.
+          find "$APP/Contents/Frameworks" -type f -perm +111 -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            codesign --force --sign - --timestamp=none "$f" 2>/dev/null || true
+          done
+          find "$APP/Contents/Frameworks" -type d \( -name '*.framework' -o -name '*.app' \) -depth -print0 2>/dev/null | while IFS= read -r -d '' f; do
+            codesign --force --sign - --timestamp=none "$f" 2>/dev/null || true
+          done
+          codesign --force --deep --sign - --timestamp=none "$APP"
+
+      - name: Verify WORKROOM identity and signature
+        shell: bash
+        run: |
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist" | grep -x 'WORKROOM'
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist" | grep -x 'WORKROOM'
+          test -x "$APP/Contents/MacOS/WORKROOM"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dv --verbose=4 "$APP" 2>&1 | grep -E 'Identifier=com\.workroom\.desktop|Signature=adhoc'
+
+      - name: Create preserved ZIP and DMG
+        shell: bash
+        run: |
+          OUT="$APP_DIR/dist/final-${{ matrix.arch }}"
+          mkdir -p "$OUT"
+
+          # ditto preserves executable bits, extended metadata and symlinks in .app bundles.
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$OUT/WORKROOM-macOS-${{ matrix.arch }}.zip"
+
+          STAGE="$RUNNER_TEMP/workroom-dmg-${{ matrix.arch }}"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          ditto "$APP" "$STAGE/WORKROOM.app"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname 'WORKROOM' -srcfolder "$STAGE" -ov -format UDZO "$OUT/WORKROOM-macOS-${{ matrix.arch }}.dmg"
+
+          test -s "$OUT/WORKROOM-macOS-${{ matrix.arch }}.zip"
+          test -s "$OUT/WORKROOM-macOS-${{ matrix.arch }}.dmg"
+          ls -lh "$OUT"
+
+      - name: Upload fixed macOS build
         uses: actions/upload-artifact@v4
         with:
-          name: WORKROOM-macOS-${{ matrix.arch }}
-          path: |
-            ${{ env.APP_DIR }}/dist/*.dmg
-            ${{ env.APP_DIR }}/dist/*-mac.zip
+          name: WORKROOM-macOS-${{ matrix.arch }}-fixed
+          path: ${{ env.APP_DIR }}/dist/final-${{ matrix.arch }}/*
           if-no-files-found: error
+          compression-level: 0
