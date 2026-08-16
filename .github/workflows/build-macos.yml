@@ -1,0 +1,66 @@
+name: Build WORKROOM for macOS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'WORKROOM_macOS_v16_dock_WORKROOM.zip'
+      - '.github/workflows/build-macos.yml'
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [arm64, x64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Unpack WORKROOM source
+        shell: bash
+        run: |
+          test -f WORKROOM_macOS_v16_dock_WORKROOM.zip
+          mkdir -p build-src
+          ditto -x -k WORKROOM_macOS_v16_dock_WORKROOM.zip build-src
+          APP_DIR="$(find build-src -name package.json -type f -maxdepth 3 -print -quit | xargs dirname)"
+          echo "APP_DIR=$APP_DIR" >> "$GITHUB_ENV"
+          echo "Source: $APP_DIR"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          cd "$APP_DIR"
+          npm install
+
+      - name: Build WORKROOM.app and DMG
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          cd "$APP_DIR"
+          npx electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
+
+      - name: Verify WORKROOM identity
+        shell: bash
+        run: |
+          APP="$(find "$APP_DIR/dist" -type d -name 'WORKROOM.app' -print -quit)"
+          test -n "$APP"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist"
+          test -x "$APP/Contents/MacOS/WORKROOM"
+
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WORKROOM-macOS-${{ matrix.arch }}
+          path: |
+            ${{ env.APP_DIR }}/dist/*.dmg
+            ${{ env.APP_DIR }}/dist/*-mac.zip
+          if-no-files-found: error
