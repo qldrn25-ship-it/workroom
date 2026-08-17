@@ -46,9 +46,10 @@ jobs:
           $src = Join-Path $env:APP_DIR 'native\ForegroundHelper.cs'
           $out = Join-Path $env:APP_DIR 'native\foreground-helper.exe'
           if (!(Test-Path $src)) { throw 'ForegroundHelper.cs not found' }
-          $csc = Get-ChildItem "$env:WINDIR\Microsoft.NET\Framework64" -Recurse -Filter csc.exe | Sort-Object FullName -Descending | Select-Object -First 1
-          if (!$csc) { throw 'csc.exe not found' }
-          & $csc.FullName /nologo /target:exe /optimize+ /out:$out $src
+          $csc = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Roslyn' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$csc) { throw 'Modern Roslyn csc.exe not found' }
+          Write-Host "Using compiler: $($csc.FullName)"
+          & $csc.FullName /nologo /target:exe /optimize+ /langversion:latest /out:$out $src
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $out)) { throw 'Foreground helper compile failed' }
 
       - name: Defender scan native helper
