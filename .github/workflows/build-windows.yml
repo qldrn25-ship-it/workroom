@@ -35,10 +35,18 @@ jobs:
         shell: pwsh
         run: |
           $forbidden = Get-ChildItem -Path 'build-src' -Recurse -File | Where-Object { $_.Extension -in '.exe','.dll','.msi','.bat','.cmd','.ps1','.vbs' }
-          if ($forbidden) {
-            $forbidden | ForEach-Object { Write-Host $_.FullName }
-            throw 'Executable payload found in source archive'
-          }
+          if ($forbidden) { $forbidden | ForEach-Object { Write-Host $_.FullName }; throw 'Executable payload found in source archive' }
+
+      - name: Fix packaged renderer path
+        shell: pwsh
+        run: |
+          $main = Join-Path $env:APP_DIR 'main.js'
+          $text = Get-Content $main -Raw
+          $text = $text.Replace("path.join(__dirname, '..', 'app', 'assets', 'WORKROOM.ico')", "path.join(__dirname, 'app', 'assets', 'WORKROOM.ico')")
+          $text = $text.Replace("path.join(__dirname, '..', 'app', 'index.html')", "path.join(__dirname, 'app', 'index.html')")
+          Set-Content -Path $main -Value $text -Encoding UTF8
+          if ($text -match "__dirname, '\.\.', 'app'") { throw 'Old renderer path still present' }
+          Write-Host 'Renderer path corrected to packaged app/app/index.html'
 
       - name: Compile foreground helper from C# source
         shell: pwsh
@@ -48,7 +56,6 @@ jobs:
           if (!(Test-Path $src)) { throw 'ForegroundHelper.cs not found' }
           $csc = Get-ChildItem "$env:ProgramFiles\Microsoft Visual Studio" -Recurse -Filter csc.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Roslyn' } | Sort-Object FullName -Descending | Select-Object -First 1
           if (!$csc) { throw 'Modern Roslyn csc.exe not found' }
-          Write-Host "Using compiler: $($csc.FullName)"
           & $csc.FullName /nologo /target:exe /optimize+ /langversion:latest /out:$out $src
           if ($LASTEXITCODE -ne 0 -or !(Test-Path $out)) { throw 'Foreground helper compile failed' }
 
@@ -73,6 +80,19 @@ jobs:
         run: |
           Set-Location $env:APP_DIR
           npx electron-builder --win dir --x64 --publish never
+
+      - name: Verify packaged UI files
+        shell: pwsh
+        run: |
+          Set-Location $env:APP_DIR
+          $asar = Join-Path $env:APP_DIR 'dist\win-unpacked\resources\app.asar'
+          if (!(Test-Path $asar)) { throw 'app.asar not found' }
+          npx asar list $asar | Out-File asar-files.txt
+          $list = Get-Content asar-files.txt -Raw
+          if ($list -notmatch 'app\\index.html') { throw 'Packaged app/index.html missing' }
+          if ($list -notmatch 'app\\style.css') { throw 'Packaged app/style.css missing' }
+          if ($list -notmatch 'app\\app.js') { throw 'Packaged app/app.js missing' }
+          Write-Host 'Required renderer files are present in app.asar'
 
       - name: Defender scan unpacked WORKROOM
         shell: pwsh
@@ -99,27 +119,19 @@ jobs:
           if (!(Test-Path $mp)) { $mp = (Get-ChildItem "$env:ProgramData\Microsoft\Windows Defender\Platform" -Recurse -Filter MpCmdRun.exe | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName }
           $files = Get-ChildItem -Path "$env:APP_DIR\dist" -File | Where-Object { $_.Extension -eq '.exe' }
           if (!$files) { throw 'No final EXE artifacts found' }
-          foreach ($f in $files) {
-            Write-Host "Scanning $($f.Name)"
-            & $mp -Scan -ScanType 3 -File $f.FullName
-            if ($LASTEXITCODE -ne 0) { throw "Defender detected $($f.Name) (exit $LASTEXITCODE)" }
-          }
+          foreach ($f in $files) { & $mp -Scan -ScanType 3 -File $f.FullName; if ($LASTEXITCODE -ne 0) { throw "Defender detected $($f.Name) (exit $LASTEXITCODE)" } }
 
       - name: Generate SHA256 checksums
         shell: pwsh
         run: |
           $files = Get-ChildItem -Path "$env:APP_DIR\dist" -File | Where-Object { $_.Extension -eq '.exe' }
-          $lines = foreach ($f in $files) {
-            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
-            "$h  $($f.Name)"
-          }
+          $lines = foreach ($f in $files) { $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower(); "$h  $($f.Name)" }
           $lines | Out-File -FilePath "$env:APP_DIR\dist\SHA256SUMS.txt" -Encoding ascii
-          Get-Content "$env:APP_DIR\dist\SHA256SUMS.txt"
 
-      - name: Upload Defender-clean Windows build
+      - name: Upload fixed Defender-clean Windows build
         uses: actions/upload-artifact@v4
         with:
-          name: WORKROOM-Windows-v17-Defender-clean
+          name: WORKROOM-Windows-v18-UI-fixed-Defender-clean
           path: |
             ${{ env.APP_DIR }}/dist/*.exe
             ${{ env.APP_DIR }}/dist/SHA256SUMS.txt
