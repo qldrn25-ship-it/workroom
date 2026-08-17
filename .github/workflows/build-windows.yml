@@ -1,0 +1,110 @@
+name: Build WORKROOM for Windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'WORKROOM_Standalone_v16_taskbar_WORKROOM.zip'
+      - '.github/workflows/build-windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Unpack WORKROOM source
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'WORKROOM_Standalone_v16_taskbar_WORKROOM.zip')) { throw 'Source zip not found' }
+          Expand-Archive -Path 'WORKROOM_Standalone_v16_taskbar_WORKROOM.zip' -DestinationPath 'build-src' -Force
+          $pkg = Get-ChildItem -Path 'build-src' -Filter 'package.json' -Recurse | Select-Object -First 1
+          if (!$pkg) { throw 'package.json not found' }
+          "APP_DIR=$($pkg.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Audit launcher and source
+        shell: pwsh
+        run: |
+          Set-Location $env:APP_DIR
+          $bad = Get-ChildItem -Recurse -File | Where-Object { $_.Extension -in '.ps1','.bat','.cmd','.vbs','.js' } | Select-String -Pattern 'Invoke-WebRequest|Start-BitsTransfer|DownloadString|DownloadFile|powershell.exe|cmd.exe|wscript.exe|cscript.exe|msedge.exe|chrome.exe' -SimpleMatch -ErrorAction SilentlyContinue
+          if ($bad) {
+            Write-Host 'Potential launcher/downloader strings found:'
+            $bad | ForEach-Object { Write-Host $_.Path $_.Line }
+          }
+          Write-Host 'Audit complete.'
+
+      - name: Install dependencies cleanly
+        shell: pwsh
+        run: |
+          Set-Location $env:APP_DIR
+          if (Test-Path 'package-lock.json') { npm ci --ignore-scripts=false } else { npm install --ignore-scripts=false }
+
+      - name: Build unpacked WORKROOM app
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          Set-Location $env:APP_DIR
+          npx electron-builder --win dir --x64 --publish never
+
+      - name: Defender scan unpacked application
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem -Path "$env:APP_DIR\dist" -Directory | Where-Object { $_.Name -match 'win-unpacked' } | Select-Object -First 1
+          if (!$app) { throw 'win-unpacked output not found' }
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (!(Test-Path $mp)) { $mp = "$env:ProgramData\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe"; $mp = (Get-Item $mp | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName }
+          & $mp -Scan -ScanType 3 -File $app.FullName
+          if ($LASTEXITCODE -ne 0) { throw "Microsoft Defender detected a threat in unpacked app (exit $LASTEXITCODE)" }
+
+      - name: Build portable and installer
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          Set-Location $env:APP_DIR
+          npx electron-builder --win portable nsis --x64 --publish never
+
+      - name: Defender scan final artifacts
+        shell: pwsh
+        run: |
+          $mp = "$env:ProgramFiles\Windows Defender\MpCmdRun.exe"
+          if (!(Test-Path $mp)) { $mp = "$env:ProgramData\Microsoft\Windows Defender\Platform\*\MpCmdRun.exe"; $mp = (Get-Item $mp | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName }
+          $files = Get-ChildItem -Path "$env:APP_DIR\dist" -File | Where-Object { $_.Extension -eq '.exe' }
+          if (!$files) { throw 'No Windows EXE artifacts found' }
+          foreach ($f in $files) {
+            Write-Host "Scanning $($f.Name)"
+            & $mp -Scan -ScanType 3 -File $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Microsoft Defender detected a threat in $($f.Name) (exit $LASTEXITCODE)" }
+          }
+
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path "$env:APP_DIR\dist" -File | Where-Object { $_.Extension -eq '.exe' }
+          $lines = foreach ($f in $files) {
+            $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($f.Name)"
+          }
+          $lines | Out-File -FilePath "$env:APP_DIR\dist\SHA256SUMS.txt" -Encoding ascii
+          Get-Content "$env:APP_DIR\dist\SHA256SUMS.txt"
+
+      - name: Upload clean Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WORKROOM-Windows-x64-clean
+          path: |
+            ${{ env.APP_DIR }}/dist/*.exe
+            ${{ env.APP_DIR }}/dist/SHA256SUMS.txt
+          if-no-files-found: error
